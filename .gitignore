@@ -1,0 +1,25 @@
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Secrets & Local Configurations
+.env
+.cloud-env.txt
+credentials.json
+token.json
+conversation_full.md
+formatted_conversation.md
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# System and logs
+*.log
+.DS_Store
+Thumbs.db
+

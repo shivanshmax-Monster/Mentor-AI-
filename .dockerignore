@@ -1,0 +1,14 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.env
+.cloud-env.txt
+credentials.json
+token.json
+*.log
+conversation_full.md
+formatted_conversation.md
+start_gui.bat
+

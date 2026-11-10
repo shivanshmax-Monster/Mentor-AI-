@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: habitsync-ai
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: CLOUD_ENV
+        value: "true"
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: NOTIFICATION_CHANNEL
+        value: telegram
+      - key: REMINDER_ENABLED
+        value: "true"
+      - key: REMINDER_INTERVAL_MINUTES
+        value: "240"
+      - key: REMINDER_TIMEZONE
+        value: Asia/Kolkata
+      - key: REMINDER_START_HOUR
+        value: "8"
+      - key: REMINDER_END_HOUR
+        value: "22"
+      - key: TELEGRAM_WEBHOOK_SECRET
+        generateValue: true
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: GOOGLE_TOKEN_JSON
+        sync: false
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
+      - key: DASHBOARD_PASSWORD
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_NUMBER
+        sync: false
+      - key: TWILIO_CONTENT_SID
+        value: HXfe5ab5f00277942d4d4200328b4d403c
+      - key: USER_WHATSAPP_NUMBER
+        sync: false
