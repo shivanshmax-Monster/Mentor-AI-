@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import html
 import json
 import logging
@@ -231,6 +232,15 @@ class TelegramService:
     def is_polling(self) -> bool:
         return bool(self._webhook_active or (self._is_polling and self._polling_task and not self._polling_task.done()))
 
+    def get_safe_webhook_secret(self) -> str:
+        """Returns a Telegram-compliant webhook secret ([A-Za-z0-9_-] only)."""
+        raw = config.TELEGRAM_WEBHOOK_SECRET.strip()
+        if not raw:
+            return ""
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,256}", raw):
+            return raw
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:48]
+
     async def setup_webhook(self, base_url: Optional[str] = None) -> bool:
         """Registers HTTPS webhook with Telegram (recommended for free-tier cloud wakeups)."""
         target_base = (base_url or config.PUBLIC_BASE_URL).strip().rstrip("/")
@@ -243,8 +253,9 @@ class TelegramService:
             "url": webhook_url,
             "allowed_updates": ["message"],
         }
-        if config.TELEGRAM_WEBHOOK_SECRET:
-            payload["secret_token"] = config.TELEGRAM_WEBHOOK_SECRET
+        safe_secret = self.get_safe_webhook_secret()
+        if safe_secret:
+            payload["secret_token"] = safe_secret
 
         try:
             async with httpx.AsyncClient(timeout=12.0) as client:
@@ -259,6 +270,14 @@ class TelegramService:
             logger.error(f"Error setting Telegram webhook: {e}")
         return False
 
+    async def _init_webhook_or_poll(self):
+        """Registers Telegram webhook, falling back automatically to polling on failure."""
+        ok = await self.setup_webhook()
+        if not ok:
+            logger.warning("Webhook registration skipped or failed; falling back to Telegram polling.")
+            self._webhook_active = False
+            self.start_polling(loop=self._loop)
+
     def start_listener(self, loop: Optional[asyncio.AbstractEventLoop] = None):
         """Starts Telegram updates listener: HTTPS webhook on cloud if PUBLIC_BASE_URL is set, else long-polling."""
         if not config.TELEGRAM_BOT_TOKEN or config.TELEGRAM_BOT_TOKEN.startswith("your_"):
@@ -271,7 +290,7 @@ class TelegramService:
                 self._loop = target_loop
 
                 def _register():
-                    target_loop.create_task(self.setup_webhook())
+                    target_loop.create_task(self._init_webhook_or_poll())
 
                 try:
                     if asyncio.get_running_loop() is target_loop:

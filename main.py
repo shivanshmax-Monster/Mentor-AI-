@@ -635,9 +635,10 @@ def send_reminder():
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
     """Telegram Bot HTTPS Webhook (used automatically on cloud hosts with PUBLIC_BASE_URL)."""
-    if config.TELEGRAM_WEBHOOK_SECRET:
+    expected_secret = telegram_service.get_safe_webhook_secret()
+    if expected_secret:
         header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if not hmac.compare_digest(header_secret, config.TELEGRAM_WEBHOOK_SECRET):
+        if not hmac.compare_digest(header_secret, expected_secret):
             raise HTTPException(status_code=403, detail="Invalid Telegram webhook secret token")
 
     update = await request.json()
