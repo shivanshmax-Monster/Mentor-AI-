@@ -1,12 +1,13 @@
 import asyncio
 import base64
+import hashlib
 import hmac
 import json
 import logging
 import os
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, Request, Form, Response, HTTPException, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from config import config
@@ -23,34 +24,101 @@ logger = logging.getLogger("HabitSyncApp")
 app = FastAPI(
     title="HabitSync AI - GUI Dashboard",
     description="Interactive Web Interface & Backend for HabitSync AI (Google Tasks + WhatsApp + Telegram + Gemini)",
-    version="1.2.0"
+    version="1.2.1"
 )
 
-PUBLIC_PATHS = {"/health", "/webhook/telegram", "/webhook/whatsapp"}
+PUBLIC_PATHS = {"/health", "/webhook/telegram", "/webhook/whatsapp", "/auth/login"}
+SESSION_COOKIE_NAME = "habitsync_session"
 
 
-@app.middleware("http")
-async def optional_dashboard_auth(request: Request, call_next):
-    """Protects dashboard and API endpoints with HTTP Basic Auth if DASHBOARD_PASSWORD is set."""
-    expected_pw = config.DASHBOARD_PASSWORD
-    if not expected_pw or request.url.path in PUBLIC_PATHS:
-        return await call_next(request)
+def _session_token(password: str) -> str:
+    return hmac.new(password.encode("utf-8"), b"habitsync-dashboard-v1", hashlib.sha256).hexdigest()
+
+
+def _is_authenticated_request(request: Request, expected_pw: str) -> bool:
+    cookie_val = request.cookies.get(SESSION_COOKIE_NAME, "")
+    if cookie_val and hmac.compare_digest(cookie_val, _session_token(expected_pw)):
+        return True
 
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Basic "):
         try:
             decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
             _, password = decoded.split(":", 1)
-            if hmac.compare_digest(password, expected_pw):
-                return await call_next(request)
+            return hmac.compare_digest(password, expected_pw)
         except Exception:
-            pass
+            return False
+    return False
 
-    return Response(
-        status_code=401,
-        headers={"WWW-Authenticate": 'Basic realm="HabitSync AI Dashboard"'},
-        content="Authentication required"
+
+def _render_login_html(error_msg: str = "") -> str:
+    err_block = (
+        f'<div class="bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs rounded-xl px-3 py-2">{error_msg}</div>'
+        if error_msg
+        else ""
     )
+    return f"""<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unlock HabitSync AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-[#0b0f19] text-slate-200 min-h-screen flex items-center justify-center p-4">
+    <form method="POST" action="/auth/login" class="w-full max-w-sm bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-2xl">
+        <div class="text-center space-y-1">
+            <h1 class="text-lg font-bold text-white">HabitSync AI Dashboard</h1>
+            <p class="text-xs text-slate-400">Enter your DASHBOARD_PASSWORD to unlock</p>
+        </div>
+        {err_block}
+        <input type="password" name="password" required autofocus placeholder="Dashboard Password"
+            class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-sky-500">
+        <button type="submit" class="w-full bg-sky-600 hover:bg-sky-500 text-white font-semibold py-2.5 rounded-xl text-sm transition">
+            Unlock Dashboard
+        </button>
+    </form>
+</body>
+</html>"""
+
+
+@app.middleware("http")
+async def optional_dashboard_auth(request: Request, call_next):
+    """Protects dashboard and API endpoints via signed cookie or Basic Auth when DASHBOARD_PASSWORD is set."""
+    expected_pw = config.DASHBOARD_PASSWORD
+    if not expected_pw or request.url.path in PUBLIC_PATHS:
+        return await call_next(request)
+
+    if _is_authenticated_request(request, expected_pw):
+        # Never place call_next inside auth try/except so app exceptions remain real 500s
+        return await call_next(request)
+
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(status_code=401, content={"detail": "Authentication required. Please log in."})
+
+    return HTMLResponse(content=_render_login_html(), status_code=401)
+
+
+@app.get("/auth/login", response_class=HTMLResponse)
+def login_page():
+    return HTMLResponse(content=_render_login_html())
+
+
+@app.post("/auth/login")
+def login_submit(password: str = Form(...)):
+    expected_pw = config.DASHBOARD_PASSWORD
+    if expected_pw and not hmac.compare_digest(password, expected_pw):
+        return HTMLResponse(content=_render_login_html("Incorrect dashboard password."), status_code=401)
+
+    resp = RedirectResponse(url="/", status_code=303)
+    if expected_pw:
+        resp.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=_session_token(expected_pw),
+            httponly=True,
+            samesite="lax",
+            max_age=60 * 60 * 24 * 30,
+        )
+    return resp
 
 
 @app.on_event("startup")
@@ -235,6 +303,33 @@ async def upload_credentials(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class TokenJsonPayload(BaseModel):
+    token_json: str
+
+
+@app.post("/api/upload-token")
+async def upload_token(file: UploadFile = File(...)):
+    """Uploads and applies a fresh token.json at runtime (useful for Cloud re-auth)."""
+    try:
+        content = await file.read()
+        tasks_service.save_token_data(content.decode("utf-8"))
+        return {"status": "success", "message": "token.json applied and Google Tasks connected!"}
+    except Exception as e:
+        logger.error(f"Token upload error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/paste-token")
+def paste_token(payload: TokenJsonPayload):
+    """Applies pasted GOOGLE_TOKEN_JSON directly at runtime."""
+    try:
+        tasks_service.save_token_data(payload.token_json.strip())
+        return {"status": "success", "message": "Google Tasks token updated and verified!"}
+    except Exception as e:
+        logger.error(f"Token paste error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/api/auth/google")
 def auth_google():
     """Triggers the browser Google OAuth flow."""
@@ -340,13 +435,16 @@ def test_telegram(payload: Optional[TestTelegramPayload] = None):
 def list_tasks():
     """Fetches pending tasks from Google Tasks."""
     if not tasks_service.is_authenticated():
-        return {"status": "unauthenticated", "tasks": []}
+        return {"status": "unauthenticated", "error": tasks_service.get_last_auth_error() or "Google Tasks token missing or expired.", "tasks": []}
     try:
         tasks = tasks_service.get_pending_tasks()
         return {"status": "success", "count": len(tasks), "tasks": tasks}
     except Exception as e:
         logger.error(f"Error fetching tasks: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        err_str = str(e)
+        if any(k in err_str.lower() for k in ("expired", "revoked", "invalid_grant", "missing")):
+            return {"status": "unauthenticated", "error": err_str, "tasks": []}
+        raise HTTPException(status_code=500, detail=err_str)
 
 
 @app.post("/api/tasks")
@@ -381,14 +479,23 @@ def chat_with_bot(payload: ChatPayload):
     session_id = "web"
     last_assistant_msg = chat_contexts.get(session_id, "")
 
-    try:
-        pending_tasks = tasks_service.get_pending_tasks() if tasks_service.is_authenticated() else []
-    except Exception:
-        pending_tasks = []
+    pending_tasks: List[Dict[str, Any]] = []
+    tasks_auth_error: Optional[str] = None
+    if tasks_service.is_authenticated():
+        try:
+            pending_tasks = tasks_service.get_pending_tasks()
+        except Exception as e:
+            logger.error(f"Chat tasks fetch failed: {e}")
+            tasks_auth_error = str(e)
+    else:
+        tasks_auth_error = tasks_service.get_last_auth_error() or "Google Tasks not connected."
 
     # 1. User wants to view task list
     if any(k in normalized for k in LIST_KEYWORDS):
-        reply = whatsapp_service.format_reminder_text(pending_tasks)
+        if tasks_auth_error:
+            reply = f"⚠️ Google Tasks authorization expired or missing ({tasks_auth_error}). Please update your Google Token in Settings."
+        else:
+            reply = whatsapp_service.format_reminder_text(pending_tasks)
         chat_contexts[session_id] = reply
         return {"action": "list", "response": reply}
 
@@ -417,7 +524,18 @@ def chat_with_bot(payload: ChatPayload):
 def send_reminder():
     """Triggers reminder dispatch based on active channel selection (telegram, whatsapp, or both)."""
     channel = config.NOTIFICATION_CHANNEL
-    pending = tasks_service.get_pending_tasks() if tasks_service.is_authenticated() else []
+    if not tasks_service.is_authenticated():
+        raise HTTPException(
+            status_code=400,
+            detail=tasks_service.get_last_auth_error() or "Google Tasks token missing or expired! Please reconnect Google Tasks in Settings."
+        )
+
+    try:
+        pending = tasks_service.get_pending_tasks()
+    except Exception as e:
+        logger.error(f"Reminder fetch tasks failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Google Tasks error: {e}")
+
     dispatches = {}
 
     # WhatsApp dispatch
@@ -756,17 +874,24 @@ def index():
                         <div class="bg-dark-800/60 p-4 rounded-xl border border-slate-800 space-y-3 flex flex-col justify-between">
                             <div>
                                 <div class="flex items-center justify-between">
-                                    <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Step B: 1-Click Login</span>
+                                    <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Step B: Authorize Token</span>
                                     <span id="auth-token-status" class="text-xs text-slate-400">Pending</span>
                                 </div>
                                 <p class="text-xs text-slate-400 leading-relaxed mt-2">
-                                    Clicking opens Google sign-in in your browser to grant Tasks read/write permissions.
+                                    Locally, click login below. On Cloud, upload a fresh <code class="text-sky-300 font-mono">token.json</code> (and publish your Google OAuth app from <i>Testing</i> &rarr; <i>In production</i> so tokens don't expire every 7 days).
                                 </p>
                             </div>
-                            <button id="btn-google-auth" onclick="startGoogleAuth()" class="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2.5 rounded-lg text-xs transition">
-                                <i data-lucide="log-in" class="w-3.5 h-3.5"></i>
-                                Connect Google Account
-                            </button>
+                            <div class="space-y-2">
+                                <button id="btn-google-auth" onclick="startGoogleAuth()" class="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold px-4 py-2 rounded-lg text-xs transition">
+                                    <i data-lucide="log-in" class="w-3.5 h-3.5"></i>
+                                    Connect Google Account
+                                </button>
+                                <label class="cursor-pointer w-full flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg px-3 py-2 text-xs font-medium transition">
+                                    <i data-lucide="upload" class="w-3.5 h-3.5"></i>
+                                    <span>Upload token.json (Cloud Re-Auth)</span>
+                                    <input type="file" id="token-file-input" accept=".json" class="hidden" onchange="uploadTokenFile(event)">
+                                </label>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1404,14 +1529,33 @@ def index():
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(payload)
                 });
-                const data = await res.json();
-                showToast(data.message, 'success');
-                fetchStatus();
+                const data = await parseJsonSafe(res);
+                if (res.ok) {
+                    showToast(data.message, 'success');
+                    fetchStatus();
+                } else {
+                    showToast(data.detail || 'Failed to save settings', 'error');
+                }
             } catch (e) {
                 showToast('Failed to save settings: ' + e, 'error');
             }
         }
 
+        async function parseJsonSafe(res) {
+            if (res.status === 401) {
+                showToast('Session expired. Opening login screen...', 'error');
+                setTimeout(() => window.location.reload(), 1000);
+                return { detail: 'Authentication required' };
+            }
+            const raw = await res.text();
+            try {
+                return JSON.parse(raw);
+            } catch {
+                return { detail: raw || `HTTP ${res.status}` };
+            }
+        }
+
+        // Save All Settings wrapper handles continue cleanly
         // Upload Credentials File
         async function uploadCredentialsFile(event) {
             const file = event.target.files[0];
@@ -1425,7 +1569,7 @@ def index():
                     method: 'POST',
                     body: formData
                 });
-                const data = await res.json();
+                const data = await parseJsonSafe(res);
                 if (res.ok) {
                     showToast('credentials.json uploaded successfully!', 'success');
                     fetchStatus();
@@ -1437,18 +1581,47 @@ def index():
             }
         }
 
+        // Upload token.json directly (Cloud Re-Auth)
+        async function uploadTokenFile(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            showToast('Uploading & verifying Google Tasks token...', 'info');
+
+            try {
+                const res = await fetch('/api/upload-token', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await parseJsonSafe(res);
+                if (res.ok) {
+                    showToast('✅ ' + data.message, 'success');
+                    fetchStatus();
+                } else {
+                    showToast(data.detail || 'Token upload failed', 'error');
+                }
+            } catch (e) {
+                showToast('Token upload error: ' + e, 'error');
+            }
+        }
+
         // Google Auth Trigger
         async function startGoogleAuth() {
             showToast('Opening Google Sign-in in your browser...', 'info');
             try {
                 const res = await fetch('/api/auth/google', {method: 'POST'});
-                const data = await res.json();
+                const data = await parseJsonSafe(res);
+                if (data.status === 'error') {
+                    showToast(data.message || data.detail, 'error');
+                    return;
+                }
                 showToast(data.message, 'info');
 
-                // Poll every 3 seconds for completion
                 const interval = setInterval(async () => {
                     const statusRes = await fetch('/api/status');
-                    const statusData = await statusRes.json();
+                    const statusData = await parseJsonSafe(statusRes);
                     if (statusData.is_authenticated_google) {
                         clearInterval(interval);
                         showToast('🎉 Google Tasks Connected Successfully!', 'success');
@@ -1470,7 +1643,7 @@ def index():
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({gemini_api_key: key || null})
                 });
-                const data = await res.json();
+                const data = await parseJsonSafe(res);
                 if (res.ok) {
                     showToast('✅ Gemini Connected! Response: "' + data.response + '"', 'success');
                     fetchStatus();
@@ -1498,7 +1671,7 @@ def index():
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(payload)
                 });
-                const data = await res.json();
+                const data = await parseJsonSafe(res);
                 if (res.ok) {
                     showToast('✅ ' + data.message + ' (SID: ' + data.message_sid + ')', 'success');
                     fetchStatus();
@@ -1523,7 +1696,7 @@ def index():
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(payload)
                 });
-                const data = await res.json();
+                const data = await parseJsonSafe(res);
                 if (res.ok) {
                     showToast('✅ ' + data.message, 'success');
                     fetchStatus();
@@ -1541,13 +1714,21 @@ def index():
             container.innerHTML = '<div class="text-center py-12 text-slate-500">Loading tasks...</div>';
             try {
                 const res = await fetch('/api/tasks');
-                const data = await res.json();
+                const data = await parseJsonSafe(res);
+                if (!res.ok) {
+                    container.innerHTML = `<div class="p-4 bg-rose-500/10 text-rose-400 text-xs rounded-xl">${data.detail || 'Failed to load tasks'}</div>`;
+                    return;
+                }
                 if (data.status === 'unauthenticated') {
+                    const pill = document.getElementById('tasks-count-pill');
+                    pill.textContent = '!';
+                    pill.classList.remove('hidden');
+                    fetchStatus();
                     container.innerHTML = `
-                        <div class="glass-panel p-8 rounded-2xl text-center space-y-3">
+                        <div class="glass-panel p-8 rounded-2xl text-center space-y-3 border border-amber-500/30">
                             <i data-lucide="lock" class="w-10 h-10 text-amber-400 mx-auto"></i>
-                            <h3 class="font-semibold text-white">Google Tasks Not Connected</h3>
-                            <p class="text-xs text-slate-400">Please authorize Google Tasks in the API & Setup tab first.</p>
+                            <h3 class="font-semibold text-white">Google Tasks Needs Re-Authorization</h3>
+                            <p class="text-xs text-slate-400 max-w-md mx-auto">${data.error || 'Please authorize Google Tasks in the API & Setup tab first.'}</p>
                             <button onclick="switchTab('settings')" class="px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-semibold">Go to Setup</button>
                         </div>
                     `;
@@ -1604,12 +1785,12 @@ def index():
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({title})
                 });
+                const data = await parseJsonSafe(res);
                 if (res.ok) {
                     input.value = '';
                     showToast('Task added to Google Tasks!', 'success');
                     loadTasks();
                 } else {
-                    const data = await res.json();
                     showToast(data.detail || 'Failed to add task', 'error');
                 }
             } catch (e) {
@@ -1620,18 +1801,19 @@ def index():
         async function completeTask(taskId) {
             try {
                 const res = await fetch(`/api/tasks/${taskId}/complete`, {method: 'POST'});
+                const data = await parseJsonSafe(res);
                 if (res.ok) {
                     showToast('Task marked as completed! Streak safe! 🔥', 'success');
                     loadTasks();
                 } else {
-                    showToast('Failed to complete task', 'error');
+                    showToast(data.detail || 'Failed to complete task', 'error');
                 }
             } catch (e) {
                 showToast('Error: ' + e, 'error');
             }
         }
 
-        // Chat & WhatsApp Simulator
+        // Chat & Simulator
         async function sendChatMessage() {
             const input = document.getElementById('chat-input');
             const msg = input.value.trim();
@@ -1646,8 +1828,8 @@ def index():
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({message: msg})
                 });
-                const data = await res.json();
-                appendMessage('bot', data.response);
+                const data = await parseJsonSafe(res);
+                appendMessage('bot', data.response || data.detail || 'Error communicating with assistant.');
                 if (data.action === 'completed') {
                     showToast('Task auto-completed via chat!', 'success');
                     if (!document.getElementById('tab-tasks').classList.contains('hidden')) {
@@ -1700,7 +1882,7 @@ def index():
             showToast('Sending task reminder across active channel(s)...', 'info');
             try {
                 const res = await fetch('/api/send-reminder', {method: 'POST'});
-                const data = await res.json();
+                const data = await parseJsonSafe(res);
                 if (res.ok) {
                     const sentChannels = Object.keys(data.dispatches || {})
                         .filter(k => data.dispatches[k].status === 'sent')

@@ -380,16 +380,27 @@ class TelegramService:
             return
 
         # 2. Get live pending tasks in worker thread (non-blocking)
-        try:
-            is_auth = await asyncio.to_thread(tasks_service.is_authenticated)
-            pending_tasks = await asyncio.to_thread(tasks_service.get_pending_tasks) if is_auth else []
-        except Exception as e:
-            logger.error(f"Error fetching tasks: {e}")
-            pending_tasks = []
+        pending_tasks: List[Dict[str, Any]] = []
+        tasks_error: Optional[str] = None
+        is_auth = await asyncio.to_thread(tasks_service.is_authenticated)
+        if is_auth:
+            try:
+                pending_tasks = await asyncio.to_thread(tasks_service.get_pending_tasks)
+            except Exception as e:
+                logger.error(f"Error fetching tasks: {e}")
+                tasks_error = str(e)
+        else:
+            tasks_error = tasks_service.get_last_auth_error() or "Google Tasks is not authorized."
 
         if text.startswith("/tasks") or text.lower() in ["tasks", "list", "pending", "task list"]:
-            reminder_text = self.format_reminder_text(pending_tasks)
-            await self.async_send_message(reminder_text, chat_id=chat_id)
+            if tasks_error:
+                await self.async_send_message(
+                    f"⚠️ <b>Google Tasks Disconnected</b>\n{html.escape(tasks_error)}",
+                    chat_id=chat_id,
+                )
+            else:
+                reminder_text = self.format_reminder_text(pending_tasks)
+                await self.async_send_message(reminder_text, chat_id=chat_id)
             return
 
         # 3. Check for intelligent task completion

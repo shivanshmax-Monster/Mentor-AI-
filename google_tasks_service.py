@@ -28,6 +28,8 @@ class GoogleTasksService:
         self._thread_local = threading.local()
         self._creds: Optional[Credentials] = None
         self._auth_in_progress = False
+        self._token_invalid = False
+        self._last_auth_error: Optional[str] = None
 
     def _load_creds_from_env_or_file(self) -> Optional[Credentials]:
         """Loads Google OAuth Credentials from local token.json or GOOGLE_TOKEN_JSON env var."""
@@ -61,15 +63,43 @@ class GoogleTasksService:
                 logger.debug(f"Skipping token.json write in cloud/read-only env: {e}")
 
     def is_authenticated(self) -> bool:
-        """Returns True if a valid or refreshable token exists (file or env)."""
+        """Returns True if a valid or refreshable token exists and has not failed refresh."""
+        if self._token_invalid:
+            return False
         creds = self._creds or self._load_creds_from_env_or_file()
         if not creds:
             return False
         return bool(creds.valid or (creds.expired and creds.refresh_token))
 
+    def get_last_auth_error(self) -> Optional[str]:
+        return self._last_auth_error
+
     def reset_service(self):
         self._creds = None
+        self._token_invalid = False
+        self._last_auth_error = None
         self._thread_local = threading.local()
+
+    def save_token_data(self, token_str: str):
+        """Validates, tests, and applies a fresh token.json / GOOGLE_TOKEN_JSON string at runtime."""
+        info = json.loads(token_str)
+        if "refresh_token" not in info and "token" not in info:
+            raise ValueError("Invalid token JSON! Must contain 'refresh_token' or 'token'.")
+
+        creds = Credentials.from_authorized_user_info(info, SCOPES)
+        if not creds.valid:
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                raise ValueError("Provided token is expired and has no valid refresh_token.")
+
+        with self._creds_lock:
+            self._creds = creds
+            self._token_invalid = False
+            self._last_auth_error = None
+            self._thread_local = threading.local()
+            self._persist_creds(creds)
+        logger.info("Updated Google Tasks token successfully at runtime.")
 
     def save_credentials_file(self, content_str: str):
         """Validates and saves credentials.json (and GOOGLE_CREDENTIALS_JSON in memory)."""
@@ -103,15 +133,21 @@ class GoogleTasksService:
                     logger.info("Refreshing Google Tasks access token...")
                     try:
                         creds.refresh(Request())
+                        self._token_invalid = False
+                        self._last_auth_error = None
                     except Exception as e:
                         logger.warning(f"Token refresh failed: {e}.")
+                        self._creds = None
+                        self._token_invalid = True
+                        self._last_auth_error = str(e)
                         creds = None
 
                 if not creds:
                     if config.IS_CLOUD:
                         raise RuntimeError(
-                            "Google Tasks token missing or expired in cloud environment! "
-                            "Re-authorize locally with `cli_test.py --auth` and update GOOGLE_TOKEN_JSON."
+                            "Google Tasks token expired or revoked! Publish your OAuth app in Google Cloud Console "
+                            "(Testing tokens expire every 7 days), re-authorize locally with `cli_test.py --auth`, "
+                            "and paste/upload the new token in Settings or GOOGLE_TOKEN_JSON."
                         )
 
                     if cred_path.exists():
@@ -129,6 +165,8 @@ class GoogleTasksService:
                         )
                     creds = flow.run_local_server(port=0, prompt="consent")
 
+                self._token_invalid = False
+                self._last_auth_error = None
                 self._persist_creds(creds)
 
             self._creds = creds
