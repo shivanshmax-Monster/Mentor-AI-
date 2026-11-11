@@ -21,17 +21,20 @@ class GeminiService:
         self._client = None
         self._last_key = None
 
-    def get_client(self) -> genai.Client:
-        current_key = config.GEMINI_API_KEY
-        if not current_key or current_key.startswith("your_"):
+    def get_client(self, api_key: Optional[str] = None) -> genai.Client:
+        target_key = (api_key if api_key is not None else config.GEMINI_API_KEY).strip()
+        if not target_key or target_key.startswith("your_"):
             raise ValueError(
                 "GEMINI_API_KEY is not set or is invalid! "
                 "Please get a free API key from https://aistudio.google.com and enter it in Settings."
             )
 
-        if self._client is None or self._last_key != current_key:
-            self._client = genai.Client(api_key=current_key)
-            self._last_key = current_key
+        if api_key is not None:
+            return genai.Client(api_key=target_key)
+
+        if self._client is None or self._last_key != target_key:
+            self._client = genai.Client(api_key=target_key)
+            self._last_key = target_key
         return self._client
 
     def _extract_text(self, response) -> str:
@@ -49,9 +52,14 @@ class GeminiService:
 
         return "HabitSync AI online!"
 
-    def _generate_with_fallback(self, contents: Any, config_obj: Optional[types.GenerateContentConfig] = None) -> str:
+    def _generate_with_fallback(
+        self,
+        contents: Any,
+        config_obj: Optional[types.GenerateContentConfig] = None,
+        api_key: Optional[str] = None,
+    ) -> str:
         """Attempts generation using the configured model, and automatically falls back if 429/503 occurs."""
-        client = self.get_client()
+        client = self.get_client(api_key=api_key)
 
         models_to_try = [config.GEMINI_MODEL] + [m for m in CANDIDATE_MODELS if m != config.GEMINI_MODEL]
 
@@ -66,7 +74,7 @@ class GeminiService:
                 )
                 text = self._extract_text(response)
                 if text:
-                    if model != config.GEMINI_MODEL:
+                    if api_key is None and model != config.GEMINI_MODEL:
                         logger.info(f"Updating preferred model to {model} after fallback success")
                         config.save_settings({"GEMINI_MODEL": model})
                     return text
@@ -82,18 +90,38 @@ class GeminiService:
 
         raise last_error
 
-    def test_connection(self) -> str:
+    def validate_api_key(self, api_key: str) -> tuple[bool, str]:
+        """Tests a user-provided BYOK Gemini API key against Gemini API before storing."""
+        cleaned = (api_key or "").strip()
+        if not cleaned or cleaned.startswith("your_") or len(cleaned) < 20:
+            return False, "Invalid API key format. Gemini keys usually start with 'AIza' (~39 characters)."
+        try:
+            self._generate_with_fallback(
+                contents="Reply with OK",
+                config_obj=types.GenerateContentConfig(max_output_tokens=20),
+                api_key=cleaned,
+            )
+            return True, "Gemini API key verified!"
+        except Exception as exc:
+            err = str(exc)
+            if "API_KEY_INVALID" in err or "API key not valid" in err or "400" in err or "403" in err:
+                return False, "Gemini rejected this API key. Double-check your key from aistudio.google.com."
+            return False, f"Gemini validation error: {err[:180]}"
+
+    def test_connection(self, api_key: Optional[str] = None) -> str:
         """Sends a quick test ping to Gemini to verify the API key with safe token budget."""
         return self._generate_with_fallback(
             contents="Say 'HabitSync AI online!' in 4 words or less.",
-            config_obj=types.GenerateContentConfig(max_output_tokens=300)
+            config_obj=types.GenerateContentConfig(max_output_tokens=300),
+            api_key=api_key,
         )
 
     def chat_with_tasks(
         self,
         user_message: str,
         pending_tasks: List[Dict[str, Any]],
-        conversation_history: Optional[List[Dict[str, str]]] = None
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        api_key: Optional[str] = None,
     ) -> str:
         """
         Sends user message to Gemini with system context including the user's pending tasks.
@@ -128,7 +156,8 @@ Communication Guidelines:
                 system_instruction=system_instruction,
                 temperature=0.7,
                 max_output_tokens=500
-            )
+            ),
+            api_key=api_key,
         )
 
 

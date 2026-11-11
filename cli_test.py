@@ -251,6 +251,7 @@ def main():
     parser.add_argument("--send-reminder", action="store_true", help="Send task reminder via active channel(s)")
     parser.add_argument("--simulate", type=str, help="Simulate an incoming message (e.g. 'done all aws' or 'hi')")
     parser.add_argument("--export-cloud-env", action="store_true", help="Export single-line env vars to .cloud-env.txt for cloud deploy")
+    parser.add_argument("--generate-key", action="store_true", help="Generate a fresh Fernet ENCRYPTION_KEY for Phase 2 SaaS")
 
     if len(sys.argv) == 1:
         check_status()
@@ -279,6 +280,9 @@ def main():
         simulate_incoming_message(args.simulate)
     if args.export_cloud_env:
         export_cloud_env()
+    if args.generate_key:
+        from security import generate_fernet_key
+        print(f"ENCRYPTION_KEY={generate_fernet_key()}")
 
 
 if __name__ == "__main__":

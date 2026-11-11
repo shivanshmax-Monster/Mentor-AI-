@@ -63,6 +63,15 @@ class Config:
         # Cloud & Automated Scheduler Settings
         self.PUBLIC_BASE_URL: str = _detect_public_base_url()
         self.DASHBOARD_PASSWORD: str = os.getenv("DASHBOARD_PASSWORD", "")
+
+        # Phase 2: Multi-Tenant SaaS Database, Encryption & Google Web OAuth
+        self.DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+        self.ENCRYPTION_KEY: str = os.getenv("ENCRYPTION_KEY", "")
+        self.APP_SECRET_KEY: str = os.getenv("APP_SECRET_KEY", "")
+        self.SAAS_MODE: bool = os.getenv("SAAS_MODE", "false").lower() in ("1", "true", "yes")
+        self.GOOGLE_WEB_CLIENT_ID: str = os.getenv("GOOGLE_WEB_CLIENT_ID", "")
+        self.GOOGLE_WEB_CLIENT_SECRET: str = os.getenv("GOOGLE_WEB_CLIENT_SECRET", "")
+        self.TELEGRAM_BOT_USERNAME: str = os.getenv("TELEGRAM_BOT_USERNAME", "HabitSyncShivanshBot").lstrip("@")
         self.IS_CLOUD: bool = bool(
             os.getenv("RENDER")
             or os.getenv("RAILWAY_ENVIRONMENT")
@@ -94,6 +103,11 @@ class Config:
     def has_google_token(self) -> bool:
         return bool(self.GOOGLE_TOKEN_JSON.strip()) or self.get_token_path().exists()
 
+    def has_google_web_oauth(self) -> bool:
+        return bool(self.GOOGLE_WEB_CLIENT_ID.strip() and self.GOOGLE_WEB_CLIENT_SECRET.strip()) or (
+            BASE_DIR / "credentials_web.json"
+        ).exists()
+
     def validate(self) -> dict:
         """Checks which configuration components are ready and which are missing."""
         return {
@@ -115,6 +129,8 @@ class Config:
             "channel": self.NOTIFICATION_CHANNEL,
             "google_credentials_exists": self.has_google_credentials(),
             "google_token_exists": self.has_google_token(),
+            "google_web_oauth_ready": self.has_google_web_oauth(),
+            "saas_mode": self.SAAS_MODE,
             "is_cloud": self.IS_CLOUD,
             "reminder_enabled": self.REMINDER_ENABLED,
         }

@@ -49,3 +49,17 @@ services:
         value: HXfe5ab5f00277942d4d4200328b4d403c
       - key: USER_WHATSAPP_NUMBER
         sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: APP_SECRET_KEY
+        generateValue: true
+      - key: GOOGLE_WEB_CLIENT_ID
+        sync: false
+      - key: GOOGLE_WEB_CLIENT_SECRET
+        sync: false
+      - key: SAAS_MODE
+        value: "false"
+      - key: TELEGRAM_BOT_USERNAME
+        value: HabitSyncShivanshBot

@@ -13,13 +13,42 @@ import httplib2
 import google_auth_httplib2
 from googleapiclient.discovery import build
 
-from config import config
+from config import BASE_DIR, config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("GoogleTasksService")
 
 SCOPES = ["https://www.googleapis.com/auth/tasks"]
+WEB_OAUTH_SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/tasks",
+]
 TASKS_API_BASE = "https://tasks.googleapis.com/tasks/v1"
+
+
+def get_web_oauth_client_config() -> Dict[str, str]:
+    """Resolves Google Web Application OAuth client credentials from env or credentials_web.json."""
+    client_id = (config.GOOGLE_WEB_CLIENT_ID or "").strip()
+    client_secret = (config.GOOGLE_WEB_CLIENT_SECRET or "").strip()
+    if client_id and client_secret:
+        return {"client_id": client_id, "client_secret": client_secret}
+
+    web_file = BASE_DIR / "credentials_web.json"
+    if web_file.exists():
+        data = json.loads(web_file.read_text(encoding="utf-8"))
+        section = data.get("web") or data.get("installed") or {}
+        if section.get("client_id") and section.get("client_secret"):
+            return {
+                "client_id": section["client_id"],
+                "client_secret": section["client_secret"],
+            }
+
+    raise RuntimeError(
+        "Google Web OAuth credentials are not configured. Set GOOGLE_WEB_CLIENT_ID and "
+        "GOOGLE_WEB_CLIENT_SECRET in environment variables."
+    )
 
 
 class GoogleTasksService:
@@ -306,6 +335,53 @@ class GoogleTasksService:
         result = self._request("POST", f"/lists/{task_list_id}/tasks", json=body)
         logger.info(f"Created new task: '{title}' ({result.get('id')})")
         return result
+
+
+class UserGoogleTasksClient(GoogleTasksService):
+    """Per-user isolated Google Tasks client backed by a decrypted SaaS refresh token."""
+
+    def __init__(
+        self,
+        refresh_token: str,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+    ):
+        super().__init__()
+        if not refresh_token:
+            raise ValueError("Missing Google Tasks refresh token for user")
+        self._refresh_token = refresh_token
+        self._client_id = client_id
+        self._client_secret = client_secret
+
+    def get_credentials(self, force_refresh: bool = False) -> Credentials:
+        """Builds and refreshes user-scoped OAuth credentials in memory without touching disk."""
+        with self._creds_lock:
+            if self._creds and self._creds.valid and not force_refresh:
+                return self._creds
+
+            client_id = self._client_id
+            client_secret = self._client_secret
+            if not client_id or not client_secret:
+                web_cfg = get_web_oauth_client_config()
+                client_id = client_id or web_cfg["client_id"]
+                client_secret = client_secret or web_cfg["client_secret"]
+
+            if self._creds is None:
+                self._creds = Credentials(
+                    token=None,
+                    refresh_token=self._refresh_token,
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    scopes=SCOPES,
+                )
+
+            if not self._creds.valid or force_refresh:
+                self._creds.refresh(Request())
+                self._token_invalid = False
+                self._last_auth_error = None
+
+            return self._creds
 
 
 tasks_service = GoogleTasksService()

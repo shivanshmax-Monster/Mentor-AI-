@@ -9,17 +9,22 @@ logger = logging.getLogger("TaskResolver")
 chat_contexts: Dict[str, str] = {}
 
 
-def execute_completion(matched_tasks: List[Dict[str, Any]], all_pending: List[Dict[str, Any]]) -> str:
+def execute_completion(
+    matched_tasks: List[Dict[str, Any]],
+    all_pending: List[Dict[str, Any]],
+    tasks_client: Optional[Any] = None,
+) -> str:
     """Marks matched task(s) completed in Google Tasks and returns an encouraging response."""
     from google_tasks_service import tasks_service
 
+    client = tasks_client or tasks_service
     completed_titles = []
     errors = []
     matched_ids = {t["id"] for t in matched_tasks}
 
     for t in matched_tasks:
         try:
-            tasks_service.complete_task(t["id"])
+            client.complete_task(t["id"])
             completed_titles.append(t["title"])
         except Exception as e:
             logger.error(f"Error completing task '{t.get('title')}': {e}")

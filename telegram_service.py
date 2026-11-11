@@ -367,6 +367,39 @@ class TelegramService:
             self._is_polling = False
             logger.info("Telegram polling loop exited.")
 
+    def _try_bind_telegram_user(self, link_token: str, chat_id: str) -> Optional[str]:
+        """Binds a Telegram chat_id to a SaaS DB user via `/start link_<token>`."""
+        from database import session_scope
+        from tenant_router import bind_telegram_by_link_token
+
+        with session_scope() as db:
+            user = bind_telegram_by_link_token(db, link_token=link_token, chat_id=chat_id)
+            return user.email if user else None
+
+    def _route_saas_user_message(self, chat_id: str, text: str) -> Optional[str]:
+        """Handles message using SaaS user's own credentials if chat_id is registered in DB."""
+        from database import session_scope
+        from tenant_router import find_user_by_telegram_chat, process_user_chat_message
+
+        with session_scope() as db:
+            user = find_user_by_telegram_chat(db, chat_id=chat_id)
+            if not user:
+                return None
+            return process_user_chat_message(
+                user=user,
+                user_text=text,
+                session_key=f"telegram_{chat_id}",
+                list_keywords=["tasks", "list", "pending", "task list"],
+                formatter_fn=self.format_reminder_text,
+            )
+
+    def _is_chat_bound_in_db(self, chat_id: str) -> bool:
+        from database import session_scope
+        from tenant_router import find_user_by_telegram_chat
+
+        with session_scope() as db:
+            return find_user_by_telegram_chat(db, chat_id=chat_id) is not None
+
     async def _handle_incoming_message(self, message: Dict[str, Any]):
         """Processes an incoming message from Telegram without blocking the asyncio loop."""
         chat = message.get("chat", {})
@@ -376,15 +409,31 @@ class TelegramService:
         if not text or not chat_id:
             return
 
-        # Auto-save chat ID if not set
-        if not config.TELEGRAM_CHAT_ID:
-            logger.info(f"Auto-detected Telegram Chat ID: {chat_id}. Saving to config.")
-            await asyncio.to_thread(config.save_settings, {"TELEGRAM_CHAT_ID": chat_id})
-
         logger.info(f"Incoming Telegram message from {chat_id}: '{text}'")
 
-        # 1. Handle commands
+        # 1. Handle /start (including Phase 2 multi-tenant deep-link `/start link_<token>`)
         if text.startswith("/start"):
+            parts = text.split(maxsplit=1)
+            payload = parts[1].strip() if len(parts) > 1 else ""
+            if payload.startswith("link_"):
+                link_token = payload[len("link_"):].strip()
+                bound_email = await asyncio.to_thread(self._try_bind_telegram_user, link_token, chat_id)
+                if bound_email:
+                    await self.async_send_message(
+                        (
+                            f"✅ <b>Connected to HabitSync AI!</b>\n\n"
+                            f"Your Telegram is now linked to <b>{html.escape(bound_email)}</b>.\n"
+                            "Send <code>/tasks</code> to view your Google Tasks or <code>done</code> to check them off! 🔥"
+                        ),
+                        chat_id=chat_id,
+                    )
+                else:
+                    await self.async_send_message(
+                        "⚠️ This Telegram link token is invalid or expired. Please click Refresh Status in your HabitSync AI portal and use the latest Connect link.",
+                        chat_id=chat_id,
+                    )
+                return
+
             welcome_msg = (
                 "👋 <b>Welcome to HabitSync AI!</b>\n\n"
                 "I am your personal habit accountability partner synced directly with your <b>Google Tasks</b> and powered by <b>Google Gemini</b>.\n\n"
@@ -397,6 +446,17 @@ class TelegramService:
             )
             await self.async_send_message(welcome_msg, chat_id=chat_id)
             return
+
+        # 2. Check if this Telegram chat belongs to a registered Phase 2 SaaS user
+        saas_reply = await asyncio.to_thread(self._route_saas_user_message, chat_id, text)
+        if saas_reply is not None:
+            await self.async_send_message(self._md_to_html(saas_reply), chat_id=chat_id)
+            return
+
+        # 3. Phase 1 Single-User fallback: auto-save owner chat ID if not configured
+        if not config.TELEGRAM_CHAT_ID:
+            logger.info(f"Auto-detected Telegram Chat ID: {chat_id}. Saving to config.")
+            await asyncio.to_thread(config.save_settings, {"TELEGRAM_CHAT_ID": chat_id})
 
         # 2. Get live pending tasks in worker thread (non-blocking)
         pending_tasks: List[Dict[str, Any]] = []

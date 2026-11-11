@@ -6,8 +6,12 @@ ENV/
 # Secrets & Local Configurations
 .env
 .cloud-env.txt
+.local_fernet.key
 credentials.json
+credentials_web.json
 token.json
+*.db
+*.sqlite*
 conversation_full.md
 formatted_conversation.md
 

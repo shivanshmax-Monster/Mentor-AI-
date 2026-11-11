@@ -5,8 +5,12 @@ __pycache__/
 .git/
 .env
 .cloud-env.txt
+.local_fernet.key
 credentials.json
+credentials_web.json
 token.json
+*.db
+*.sqlite*
 *.log
 conversation_full.md
 formatted_conversation.md

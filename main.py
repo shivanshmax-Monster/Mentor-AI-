@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
@@ -11,12 +12,15 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from config import config
+from database import init_db, session_scope
 from google_tasks_service import tasks_service
 from gemini_service import gemini_service
 from whatsapp_service import whatsapp_service
 from telegram_service import telegram_service
 from scheduler_service import reminder_scheduler
+from saas_routes import router as saas_router, saas_portal
 from task_resolver import resolve_tasks_to_complete, chat_contexts, execute_completion
+from tenant_router import find_user_by_whatsapp, process_user_chat_message
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("HabitSyncApp")
@@ -27,7 +31,18 @@ app = FastAPI(
     version="1.2.1"
 )
 
-PUBLIC_PATHS = {"/health", "/webhook/telegram", "/webhook/whatsapp", "/auth/login", "/home", "/privacy"}
+PUBLIC_PATHS = {
+    "/health",
+    "/webhook/telegram",
+    "/webhook/whatsapp",
+    "/auth/login",
+    "/auth/google/login",
+    "/auth/google/callback",
+    "/auth/logout",
+    "/home",
+    "/privacy",
+    "/saas",
+}
 SESSION_COOKIE_NAME = "habitsync_session"
 
 
@@ -83,9 +98,15 @@ def _render_login_html(error_msg: str = "") -> str:
 
 @app.middleware("http")
 async def optional_dashboard_auth(request: Request, call_next):
-    """Protects dashboard and API endpoints via signed cookie or Basic Auth when DASHBOARD_PASSWORD is set."""
+    """Protects admin dashboard and owner APIs when DASHBOARD_PASSWORD is set; SaaS routes manage user cookies."""
     expected_pw = config.DASHBOARD_PASSWORD
-    if not expected_pw or request.url.path in PUBLIC_PATHS:
+    path = request.url.path
+    if (
+        not expected_pw
+        or path in PUBLIC_PATHS
+        or path.startswith("/api/saas/")
+        or (config.SAAS_MODE and path == "/")
+    ):
         return await call_next(request)
 
     if _is_authenticated_request(request, expected_pw):
@@ -121,9 +142,13 @@ def login_submit(password: str = Form(...)):
     return resp
 
 
+app.include_router(saas_router)
+
+
 @app.on_event("startup")
 async def startup_event():
-    """Starts Telegram listener (webhook in cloud if PUBLIC_BASE_URL is set, else polling) and 24/7 scheduler."""
+    """Initializes SaaS database tables, Telegram listener, and 24/7 scheduler."""
+    init_db()
     loop = asyncio.get_running_loop()
     telegram_service.set_loop(loop)
     if config.TELEGRAM_BOT_TOKEN and not config.TELEGRAM_BOT_TOKEN.startswith("your_"):
@@ -652,12 +677,28 @@ async def whatsapp_webhook(
     Body: str = Form(...),
     ProfileName: Optional[str] = Form(None)
 ):
-    """Twilio WhatsApp Inbound Webhook with intelligent task resolution."""
+    """Twilio WhatsApp Inbound Webhook with Phase 2 multi-tenant routing & Phase 1 fallback."""
     user_text = Body.strip()
     normalized = user_text.lower()
     session_id = From
     last_assistant_msg = chat_contexts.get(session_id, "")
     logger.info(f"Incoming WhatsApp message from {From}: '{user_text}'")
+
+    with session_scope() as db:
+        saas_user = find_user_by_whatsapp(db, From)
+        if saas_user is not None:
+            response_text = process_user_chat_message(
+                user=saas_user,
+                user_text=user_text,
+                session_key=session_id,
+                list_keywords=list(LIST_KEYWORDS),
+                formatter_fn=whatsapp_service.format_reminder_text,
+            )
+            twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>{html.escape(response_text)}</Message>
+</Response>"""
+            return Response(content=twiml_response, media_type="application/xml")
 
     try:
         pending_tasks = tasks_service.get_pending_tasks() if tasks_service.is_authenticated() else []
@@ -685,7 +726,7 @@ async def whatsapp_webhook(
 
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Message>{response_text}</Message>
+    <Message>{html.escape(response_text)}</Message>
 </Response>"""
     return Response(content=twiml_response, media_type="application/xml")
 
@@ -694,7 +735,14 @@ async def whatsapp_webhook(
 # Frontend GUI Dashboard with Auto-Saving Tests & Interactive Setup Guides
 # ============================================================================
 @app.get("/", response_class=HTMLResponse)
-def index():
+def index(request: Request):
+    if config.SAAS_MODE:
+        return saas_portal(request)
+    return admin_dashboard()
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_dashboard():
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
