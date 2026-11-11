@@ -27,7 +27,7 @@ app = FastAPI(
     version="1.2.1"
 )
 
-PUBLIC_PATHS = {"/health", "/webhook/telegram", "/webhook/whatsapp", "/auth/login"}
+PUBLIC_PATHS = {"/health", "/webhook/telegram", "/webhook/whatsapp", "/auth/login", "/home", "/privacy"}
 SESSION_COOKIE_NAME = "habitsync_session"
 
 
@@ -148,6 +148,67 @@ def health_check():
         "google_tasks_authenticated": tasks_service.is_authenticated(),
         "scheduler": reminder_scheduler.get_status(),
     }
+
+
+@app.get("/home", response_class=HTMLResponse)
+def public_home():
+    """Public landing page for Google OAuth Branding verification/compliance."""
+    return HTMLResponse(content="""<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HabitSync AI - Personal Accountability Assistant</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-[#0b0f19] text-slate-200 min-h-screen flex items-center justify-center p-6">
+    <div class="max-w-xl w-full bg-slate-900/90 border border-slate-800 rounded-2xl p-8 space-y-5 shadow-2xl">
+        <h1 class="text-2xl font-bold text-white">HabitSync AI</h1>
+        <p class="text-sm text-slate-300 leading-relaxed">
+            HabitSync AI is a personal productivity and habit accountability assistant that connects your
+            Google Tasks with Telegram and WhatsApp reminders, powered by Google Gemini.
+        </p>
+        <ul class="text-xs text-slate-400 space-y-1.5 list-disc ml-5">
+            <li>Reads and completes your active Google Tasks on your explicit command.</li>
+            <li>Sends scheduled habit streak reminders via your configured Telegram or WhatsApp channel.</li>
+            <li>Provides motivational and planning coaching based on your pending task list.</li>
+        </ul>
+        <div class="pt-3 border-t border-slate-800 flex items-center justify-between text-xs">
+            <a href="/" class="text-sky-400 hover:underline font-semibold">Open Dashboard &rarr;</a>
+            <a href="/privacy" class="text-slate-400 hover:text-white underline">Privacy Policy</a>
+        </div>
+    </div>
+</body>
+</html>""")
+
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy_policy():
+    """Public privacy policy page for Google OAuth Branding configuration."""
+    return HTMLResponse(content="""<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy - HabitSync AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-[#0b0f19] text-slate-200 min-h-screen flex items-center justify-center p-6">
+    <div class="max-w-xl w-full bg-slate-900/90 border border-slate-800 rounded-2xl p-8 space-y-4 shadow-2xl">
+        <h1 class="text-xl font-bold text-white">HabitSync AI Privacy Policy</h1>
+        <p class="text-xs text-slate-300 leading-relaxed">
+            HabitSync AI uses the Google Tasks API solely to read your pending tasks, mark tasks as completed
+            when you request it, and create tasks you submit.
+        </p>
+        <p class="text-xs text-slate-400 leading-relaxed">
+            Your Google Tasks data and OAuth tokens are used strictly for your personal assistant automation,
+            are never sold or shared with third parties for advertising, and can be revoked anytime via your
+            Google Account permissions settings. Contact: shivanshmax@gmail.com.
+        </p>
+        <div class="pt-3 border-t border-slate-800 text-xs">
+            <a href="/home" class="text-sky-400 hover:underline">&larr; Back to Home</a>
+        </div>
+    </div>
+</body>
+</html>""")
 
 COMPLETION_KEYWORDS = {
     "done", "complete", "completed", "ho gaya", "khatam", "finished", "check", "ho gya", "done!"
